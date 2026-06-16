@@ -1,1 +1,64 @@
+title: Suspicious Executable Download and Immediate Execution
+id: detection-001
+description: Detects when a suspicious file is downloaded to the Downloads folder and immediately executed by the user (double-click from explorer.exe). Common pattern for phishing and malware delivery attacks.
+author: JP13007
+date: 2026/06/16
+modified: 2026/06/16
 
+detection:
+  selection:
+    EventID: 1
+    Image|endswith: '\update.exe'
+    ParentImage|endswith: '\explorer.exe'
+    CurrentDirectory|contains: 'Downloads'
+    
+  condition: selection
+
+falsepositives:
+  - Legitimate software installers (setup.exe, install.exe) downloaded and executed by users
+  - Software updates downloaded to Downloads and executed
+  - User-initiated legitimate executable downloads
+
+level: high
+status: stable
+tags:
+  - attack.initial_access
+  - attack.t1204.002
+  - attack.execution
+  - attack.t1204
+
+references:
+  - https://attack.mitre.org/techniques/T1204/002/
+  - https://attack.mitre.org/techniques/T1566/001/
+
+---
+
+## Rule Tuning Notes
+
+**False Positive Reduction:**
+
+1. **Time-based filtering** — If file was downloaded more than 2 hours before execution, likely legitimate (user saving an installer to run later)
+
+2. **Hash whitelisting** — Add trusted installer hashes (e.g., Slack, Discord, VLC setup hashes) to exclusion list
+
+3. **Filename patterns** — Modify rule to exclude known installer names:
+   ```
+   NOT Image|endswith: ('setup.exe', 'install.exe', 'installer.exe')
+   ```
+
+4. **Process signature verification** — Check if Image is signed by a trusted publisher (Microsoft, Adobe, etc.) — if signed, lower priority
+
+**Recommended SPL conversion (Splunk):**
+```spl
+sourcetype=WinEventLog:Sysmon EventID=1 Image="*update.exe" ParentImage="*explorer.exe" CurrentDirectory="*Downloads"
+| stats count by Image, ParentImage, User, ComputerName
+```
+
+**Recommended KQL conversion (Microsoft Sentinel):**
+```kql
+DeviceProcessEvents
+| where FileName =~ "update.exe"
+| where InitiatingProcessFileName =~ "explorer.exe"
+| where FolderPath contains "Downloads"
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, FileName, CommandLine
+```
