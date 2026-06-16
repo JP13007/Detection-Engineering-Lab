@@ -1,0 +1,91 @@
+title: Failed Privilege Escalation via Account Creation
+id: detection-003
+description: Detects multiple failed attempts to create local user accounts or add users to administrative groups using net.exe commands. Common post-exploitation persistence technique that is blocked by UAC or insufficient privileges.
+author: JP13007
+date: 2026/06/16
+modified: 2026/06/16
+
+detection:
+  selection1:
+    EventID: 1
+    Image|endswith: '\net.exe'
+    CommandLine|contains:
+      - 'user'
+      - 'localgroup'
+      - 'group'
+    
+  selection2:
+    EventID: 5
+    Image|endswith: '\net.exe'
+    
+  timeframe: 60s
+  
+  condition: (selection1 or selection2) | near selection2 timeframe
+  
+falsepositives:
+  - System administrators running legitimate user management scripts
+  - Help desk tools automating account creation/modification
+  - Compliance scanning tools enumerating group memberships
+  - Batch user provisioning during onboarding
+
+level: medium
+status: stable
+tags:
+  - attack.persistence
+  - attack.t1136.001
+  - attack.privilege_escalation
+  - attack.t1548.002
+
+references:
+  - https://attack.mitre.org/techniques/T1136/001/
+  - https://attack.mitre.org/techniques/T1548/002/
+
+---
+
+## Rule Tuning Notes
+
+**False Positive Reduction:**
+
+1. **Process context** — Alert only if net.exe is spawned by cmd.exe or PowerShell from a non-admin process. If spawned by SYSTEM or admin context, it's likely legitimate administration.
+
+2. **Source whitelisting** — Whitelist known admin tools:
+   - Active Directory management tools
+   - System Configuration Manager (SCCM)
+   - Puppet, Ansible, Chef configurations
+   - ServiceNow automation scripts
+
+3. **Baseline tuning** — Document how many times admins legitimately run these commands in your environment:
+   - If they run it 10x per day during onboarding, adjust alert threshold
+   - If it's rare, alert on every occurrence
+
+4. **Command-line filtering** — Add context to the rule:
+   ```
+   CommandLine|contains: 'net user'
+   AND NOT CommandLine|contains: '/add'  # Exclude user creation attempts
+   ```
+
+5. **Event log monitoring** — Pair with Windows Security Event ID 4720 (user account created) to detect successful escalation
+
+**Recommended SPL conversion (Splunk):**
+```spl
+sourcetype=WinEventLog:Sysmon EventID=1 Image="*net.exe" (CommandLine="*user*" OR CommandLine="*localgroup*")
+| stats count, latest(CommandLine) by User, ComputerName, Image
+| where count > 3  # More than 3 attempts in the timeframe
+```
+
+**Recommended KQL conversion (Microsoft Sentinel):**
+```kql
+DeviceProcessEvents
+| where FileName =~ "net.exe"
+| where CommandLine contains "user" or CommandLine contains "localgroup"
+| where InitiatingProcessName !in ("explorer.exe", "svchost.exe")
+| summarize EventCount = count() by InitiatingProcessName, FileName, ComputerName, bin(TimeGenerated, 1m)
+| where EventCount > 3
+```
+
+**Alternative: Use Event Log directly**
+```spl
+source="WinEventLog:Security" EventCode=4625
+| stats count by Account, ComputerName
+| where count > 5  # More than 5 failed logins = potential brute force or escalation attempt
+```

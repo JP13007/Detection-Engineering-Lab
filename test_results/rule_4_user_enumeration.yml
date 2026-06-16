@@ -1,0 +1,96 @@
+title: System and User Enumeration via Command Line Tools
+id: detection-004
+description: Detects when multiple reconnaissance commands are executed in quick succession (whoami, net user, systeminfo, ipconfig). Pattern commonly observed post-compromise when attackers are gathering system information to plan lateral movement and persistence.
+author: JP13007
+date: 2026/06/16
+modified: 2026/06/16
+
+detection:
+  selection_whoami:
+    EventID: 1
+    Image|endswith: '\whoami.exe'
+    CommandLine|contains: '/all'
+    
+  selection_net_user:
+    EventID: 1
+    Image|endswith: '\net.exe'
+    CommandLine|contains: 'user'
+    
+  selection_systeminfo:
+    EventID: 1
+    Image|endswith: '\systeminfo.exe'
+    
+  selection_ipconfig:
+    EventID: 1
+    Image|endswith: '\ipconfig.exe'
+    
+  timeframe: 120s
+  
+  condition: selection_whoami and selection_net_user and selection_systeminfo | near selection_ipconfig timeframe
+
+falsepositives:
+  - Troubleshooting scripts executed by help desk
+  - System baseline auditing tools (compliance, inventory)
+  - Batch deployment scripts that gather system information
+  - IT automation and orchestration tools (Ansible, Puppet)
+
+level: medium
+status: stable
+tags:
+  - attack.discovery
+  - attack.t1033
+  - attack.t1087.001
+  - attack.reconnaissance
+
+references:
+  - https://attack.mitre.org/techniques/T1033/
+  - https://attack.mitre.org/techniques/T1087/001/
+
+---
+
+## Rule Tuning Notes
+
+**False Positive Reduction:**
+
+1. **Process parent filtering** — Alert only if enumeration commands are spawned from:
+   - cmd.exe or powershell.exe (not from legitimate tools)
+   - NOT from SYSTEM context (system tools legitimately call these)
+   - NOT from Management tools (SCCM, RMM tools)
+
+2. **User context whitelisting** — If these commands come from known admin accounts, deprioritize alert. If from standard user or unknown account, escalate.
+
+3. **Source process whitelisting** — Exclude known tools:
+   ```yaml
+   ParentImage|endswith:
+     - '\puppet.exe'
+     - '\ansible.exe'
+     - '\chef.exe'
+     - '\nessus.exe'  # Vulnerability scanner
+     - '\qualys.exe'  # Vulnerability scanner
+   ```
+
+4. **Adjustment to timeframe** — If your environment regularly runs these commands together (e.g., IT automation), increase timeframe to 5 minutes to catch only suspicious bursts
+
+5. **Command-line context** — Add requirement that commands are being redirected or piped (indication of automated tooling):
+   ```yaml
+   CommandLine|contains: '|'  # Piped output
+   OR CommandLine|contains: '>'  # Redirected output
+   ```
+
+**Recommended SPL conversion (Splunk):**
+```spl
+sourcetype=WinEventLog:Sysmon EventID=1 (Image="*whoami.exe" CommandLine="*/all" OR Image="*net.exe" CommandLine="*user" OR Image="*systeminfo.exe")
+| stats count, latest(CommandLine) by ParentImage, User, ComputerName
+| where count >= 3  # At least 3 enumeration commands
+```
+
+**Recommended KQL conversion (Microsoft Sentinel):**
+```kql
+DeviceProcessEvents
+| where FileName in ("whoami.exe", "net.exe", "systeminfo.exe", "ipconfig.exe")
+| where InitiatingProcessName in ("cmd.exe", "powershell.exe")
+| summarize EnumerationCommandCount = count(), CommandList = make_set(FileName) by InitiatingProcessId, ComputerName, bin(TimeGenerated, 2m)
+| where EnumerationCommandCount >= 3
+```
+
+**Note:** This rule works best when combined with process lineage analysis. Use SIEM's ability to show full process tree, not just individual commands.
