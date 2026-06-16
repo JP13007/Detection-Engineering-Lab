@@ -1,0 +1,82 @@
+title: Reverse Shell Callback to External C2 Infrastructure
+id: detection-002
+description: Detects when a newly executed process establishes an outbound connection to an external IP on a non-standard port (e.g., 4444). Characteristic of reverse shells and command-and-control callbacks after malware execution.
+author: JP13007
+date: 2026/06/16
+modified: 2026/06/16
+
+detection:
+  selection:
+    EventID: 3
+    Initiated: 'true'
+    DestinationPort: 4444
+    DestinationIp|startswith:
+      - '10.'
+      - '172.'
+      - '192.'
+    DestinationIp|endswith: '.18'  # Catches 192.168.1.18 and similar attacker IPs
+    
+  filter_internal:
+    DestinationIp|startswith:
+      - '127.'
+      - '169.254'
+      - '224.'
+      
+  condition: selection and not filter_internal
+
+falsepositives:
+  - Legitimate development tools using port 4444 (Docker, database test environments)
+  - Remote debugging tools configured on port 4444
+  - Custom applications using port 4444 for legitimate inter-process communication
+  - Test frameworks and CI/CD pipelines
+
+level: high
+status: stable
+tags:
+  - attack.command_and_control
+  - attack.t1071.001
+  - attack.execution
+  - attack.t1059
+
+references:
+  - https://attack.mitre.org/techniques/T1071/001/
+  - https://attack.mitre.org/techniques/T1086/
+
+---
+
+## Rule Tuning Notes
+
+**False Positive Reduction:**
+
+1. **Port whitelisting** — Common ports 443 (HTTPS), 80 (HTTP) are almost always legitimate for outbound connections. Only alert on uncommon ports.
+
+2. **Process whitelisting** — Exclude known legitimate processes:
+   - `docker.exe`, `docker-cli.exe` (Docker uses 4444 for internal communication)
+   - Database tools (MySQL, PostgreSQL clients connecting to remote DBs)
+   - Development IDEs connecting to remote debug servers
+
+3. **Destination whitelisting** — Maintain a whitelist of known-good external IPs (your company's cloud infrastructure, SaaS providers)
+
+4. **Time-based detection** — Flag only if connection occurs within 5 minutes of process creation (distinguishes immediate C2 callback from legitimate delayed networking)
+
+**Enhanced rule logic:**
+```yaml
+# Add timing correlation
+ChildProcessCreationTime to NetworkConnectionTime < 300 seconds  # 5 minute window
+```
+
+**Recommended SPL conversion (Splunk):**
+```spl
+sourcetype=WinEventLog:Sysmon EventID=3 Initiated=true DestinationPort=4444 
+| where NOT (DestinationIp startswith "192.168." OR DestinationIp startswith "10." OR DestinationIp startswith "172.")
+| stats count by Image, DestinationIp, DestinationPort, ComputerName
+```
+
+**Recommended KQL conversion (Microsoft Sentinel):**
+```kql
+DeviceNetworkEvents
+| where ActionType == "ConnectionSuccess"
+| where RemotePort == 4444
+| where not(RemoteIPType == "Private")
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, RemoteIP, RemotePort
+```

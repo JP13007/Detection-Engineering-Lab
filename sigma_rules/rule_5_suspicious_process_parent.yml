@@ -1,0 +1,113 @@
+title: Suspicious Process Parent-Child Relationship - Living off the Land
+id: detection-005
+description: Detects when command-line interpreters (cmd.exe, powershell.exe) are spawned by uncommon parent processes (notepad.exe, calc.exe, explorer.exe). Attackers use legitimate programs as parents to evade detection and blend in with normal system activity (Living off the Land Binary - LOLBin technique).
+author: JP13007
+date: 2026/06/16
+modified: 2026/06/16
+
+detection:
+  selection_parent:
+    EventID: 1
+    ParentImage|endswith:
+      - '\notepad.exe'
+      - '\calc.exe'
+      - '\mspaint.exe'
+      - '\wordpad.exe'
+      - '\explorer.exe'
+      - '\taskmgr.exe'
+      
+  selection_child:
+    Image|endswith:
+      - '\cmd.exe'
+      - '\powershell.exe'
+      - '\cscript.exe'
+      - '\wscript.exe'
+      - '\regsvcs.exe'
+      
+  condition: selection_parent and selection_child
+
+falsepositives:
+  - Some legitimate applications spawn cmd.exe or powershell.exe for legitimate tasks
+  - User shell extensions that open command prompts from explorer.exe
+  - System administration tools that use notepad/calc as temporary launchers
+  - Debugging tools
+
+level: high
+status: stable
+tags:
+  - attack.execution
+  - attack.t1059.003
+  - attack.defense_evasion
+  - attack.t1036.005
+
+references:
+  - https://attack.mitre.org/techniques/T1059/003/
+  - https://attack.mitre.org/techniques/T1036/005/
+  - https://attack.mitre.org/techniques/T1218/
+
+---
+
+## Rule Tuning Notes
+
+**False Positive Reduction:**
+
+1. **Process signature verification** — Check if cmd.exe/powershell.exe child process is signed by Microsoft. If signed and running from System32, likely legitimate.
+
+2. **Command-line inspection** — Alert is higher priority if child process has suspicious command-line:
+   ```yaml
+   AND CommandLine|contains:
+     - 'whoami'
+     - 'net user'
+     - 'powershell -enc'  # Encoded PowerShell
+     - 'IEX'              # PowerShell invoke expression
+   ```
+
+3. **Parent-child combo filtering** — Some combinations are more suspicious than others:
+   ```yaml
+   # HIGH priority
+   notepad.exe -> powershell.exe
+   calc.exe -> cmd.exe
+   
+   # MEDIUM priority (some legitimate tools use these)
+   explorer.exe -> cmd.exe
+   taskmgr.exe -> powershell.exe
+   ```
+
+4. **User context** — If spawned by SYSTEM or Administrator, may be legitimate. If spawned by standard user with unusual parent, escalate.
+
+5. **Hash whitelist** — Add trusted PowerShell/cmd versions to whitelist (Microsoft-signed binaries only, reject renamed copies)
+
+**Enhanced rule with command-line context:**
+```yaml
+selection_suspicious_command:
+  CommandLine|contains:
+    - 'whoami'
+    - 'net user'
+    - 'ipconfig'
+    - 'powershell -enc'
+    - 'iex'
+
+condition: selection_parent and selection_child and selection_suspicious_command
+```
+
+**Recommended SPL conversion (Splunk):**
+```spl
+sourcetype=WinEventLog:Sysmon EventID=1 
+ParentImage IN (*notepad.exe, *calc.exe, *mspaint.exe, *wordpad.exe, *explorer.exe, *taskmgr.exe)
+Image IN (*cmd.exe, *powershell.exe, *cscript.exe, *wscript.exe)
+| stats count, latest(CommandLine) by ParentImage, Image, User, ComputerName
+```
+
+**Recommended KQL conversion (Microsoft Sentinel):**
+```kql
+DeviceProcessEvents
+| where InitiatingProcessFileName in ("notepad.exe", "calc.exe", "mspaint.exe", "wordpad.exe", "explorer.exe", "taskmgr.exe")
+| where FileName in ("cmd.exe", "powershell.exe", "cscript.exe", "wscript.exe", "regsvcs.exe")
+| where not(InitiatingProcessName =~ "svchost.exe")  // Exclude system services
+| project TimeGenerated, ComputerName, InitiatingProcessFileName, FileName, CommandLine, AccountName
+```
+
+**Additional Detection: Process Hollowing**
+This rule should be paired with memory-based detection if available, as some advanced attacks use process hollowing (legitimate parent, injected malicious child). Monitor for:
+- Process creation without corresponding command-line
+- Memory anomalies in child process
