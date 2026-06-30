@@ -1,0 +1,82 @@
+title: System and User Enumeration via Command-Line Tools
+id: detection-004
+description: Detects execution of native discovery/enumeration commands (whoami, net user/users, systeminfo, ipconfig) spawned from a command shell. Commonly run post-compromise to gather host and account information. Fires on any single enumeration command from a shell; multi-command correlation raises confidence and is handled in tuning/SPL.
+author: JP13007
+date: 2026/06/16
+modified: 2026/06/30
+
+detection:
+  selection_enum:
+    EventID: 1
+    Image|endswith:
+      - '\whoami.exe'
+      - '\net.exe'
+      - '\net1.exe'
+      - '\systeminfo.exe'
+      - '\ipconfig.exe'
+    ParentImage|endswith:
+      - '\cmd.exe'
+      - '\powershell.exe'
+
+  condition: selection_enum
+
+falsepositives:
+  - Troubleshooting scripts executed by help desk
+  - System baseline auditing tools (compliance, inventory)
+  - Batch deployment scripts that gather system information
+  - IT automation and orchestration tools (Ansible, Puppet)
+
+level: low
+status: experimental
+tags:
+  - attack.discovery
+  - attack.t1033
+  - attack.t1087.001
+
+references:
+  - https://attack.mitre.org/techniques/T1033/
+  - https://attack.mitre.org/techniques/T1087/001/
+
+---
+
+## Rule Tuning Notes
+
+**Why this changed from the original:**
+The first version required whoami AND net.exe AND systeminfo to all appear together. That does not match real telemetry: when Atomic Red Team T1033-7 ran, only `net users` executed (the `query` sub-command was unavailable on the host), so the multi-command AND rule would NOT have fired despite genuine enumeration occurring (see test_results_rule_4.md). This version fires on any single enumeration command spawned from a shell, matching the captured data; multi-command correlation is moved to the SPL/tuning layer as a confidence booster.
+
+**net.exe / net1.exe delegation:**
+Windows `net.exe` delegates to `net1.exe`, so a single `net users` produces two process-creation events (cmd.exe -> net.exe, then net.exe -> net1.exe). Both Image values are included so the rule matches either event, but downstream correlation should de-duplicate so one user action is not counted twice.
+
+**False Positive Reduction:**
+1. **Correlation for confidence** — A single enumeration command is low signal; several distinct enumeration commands from the same parent within ~2 minutes is higher signal (see multi-command SPL).
+2. **User/parent context** — Enumeration from an interactive admin session is often benign; the same commands from a freshly spawned shell under an unusual parent are higher priority.
+3. **Tool whitelisting** — Exclude known scanners/management agents (Nessus, SCCM, Ansible) by parent process.
+
+**Recommended SPL — single command (matches captured lab data):**
+```spl
+index=win_logs host=DESKTOP-9BB4HVN
+| rex field=_raw "<EventID>(?<EventID>\d+)</EventID>"
+| where EventID="1"
+| rex field=_raw "<Data Name='Image'>(?<Image>[^<]+)</Data>"
+| rex field=_raw "<Data Name='ParentImage'>(?<ParentImage>[^<]+)</Data>"
+| rex field=_raw "<Data Name='CommandLine'>(?<CommandLine>[^<]+)</Data>"
+| where like(Image,"%net.exe") OR like(Image,"%whoami.exe") OR like(Image,"%systeminfo.exe") OR like(Image,"%ipconfig.exe")
+| where like(ParentImage,"%cmd.exe") OR like(ParentImage,"%powershell.exe")
+| table _time, CommandLine, ParentImage
+```
+
+**Recommended SPL — multi-command correlation (higher confidence):**
+```spl
+... (same base search) ...
+| bin _time span=2m
+| stats dc(Image) as distinct_enum_cmds, values(CommandLine) as cmds by _time, ParentImage
+| where distinct_enum_cmds >= 2
+```
+
+**Recommended KQL conversion (Microsoft Sentinel):**
+```kql
+DeviceProcessEvents
+| where FileName in ("whoami.exe","net.exe","net1.exe","systeminfo.exe","ipconfig.exe")
+| where InitiatingProcessFileName in ("cmd.exe","powershell.exe")
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, FileName, ProcessCommandLine
+```

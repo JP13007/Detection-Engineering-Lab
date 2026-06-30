@@ -1,0 +1,96 @@
+title: Outbound Connection to Non-Standard Port (Possible C2 Callback)
+id: detection-002
+description: Detects a process establishing an outbound TCP connection to a non-standard port commonly used by reverse shells and C2 frameworks (e.g., 4444). Internal/private destination IPs are excluded so the rule focuses on connections leaving the trusted network toward external (potential C2) infrastructure.
+author: JP13007
+date: 2026/06/16
+modified: 2026/06/30
+
+# LAB LIMITATION (see test_results_rule_2.md):
+# This rule fires on connections to EXTERNAL destinations. The lab is
+# internal-only (Kali attacker at 192.168.1.18), so the real captured
+# callback goes to a PRIVATE IP and is intentionally excluded by
+# filter_private. The port/connection logic was validated against the
+# real callback; the external-destination path was not exercised with
+# live external traffic. No fabricated external scenario is claimed.
+
+detection:
+  selection:
+    EventID: 3
+    Initiated: 'true'
+    DestinationPort:
+      - 4444
+      - 5555
+      - 8888
+      - 1337
+
+  filter_private:
+    DestinationIp|startswith:
+      - '10.'
+      - '172.16.'
+      - '172.17.'
+      - '172.18.'
+      - '172.19.'
+      - '172.20.'
+      - '172.21.'
+      - '172.22.'
+      - '172.23.'
+      - '172.24.'
+      - '172.25.'
+      - '172.26.'
+      - '172.27.'
+      - '172.28.'
+      - '172.29.'
+      - '172.30.'
+      - '172.31.'
+      - '192.168.'
+      - '127.'
+      - '169.254.'
+
+  condition: selection and not filter_private
+
+falsepositives:
+  - Legitimate software using these ports to external services (rare)
+  - Remote debugging tools configured on non-standard ports
+  - Custom applications using these ports for legitimate external communication
+
+level: high
+status: experimental
+tags:
+  - attack.command_and_control
+  - attack.t1071.001
+
+references:
+  - https://attack.mitre.org/techniques/T1071/001/
+
+---
+
+## Rule Tuning Notes
+
+**Design logic:**
+- `selection` matches outbound (Initiated=true) connections to ports associated with common offensive-tool defaults.
+- `filter_private` excludes RFC1918 private ranges, loopback, and link-local, so the rule only alerts on connections leaving the internal network.
+
+**Why this changed from the original:**
+The first version had inverted logic: its `selection` required `DestinationIp|startswith: ['10.','172.','192.']`, meaning it matched ONLY internal IPs — the opposite of detecting external C2 — and hardcoded `.18` for the lab attacker. This version removes the hardcoded IP and uses `filter_private` correctly so the rule targets external destinations.
+
+**False Positive Reduction:**
+1. **Port selection** — These ports are offensive-tool defaults, not inherently malicious; whitelist by process where a legitimate app uses them.
+2. **Process whitelisting** — Exclude known-good processes.
+3. **Timing correlation** — Higher priority if the connecting process was created shortly before the connection.
+
+**Recommended SPL conversion (Splunk):**
+```spl
+sourcetype=WinEventLog:Sysmon EventID=3 Initiated=true
+(DestinationPort=4444 OR DestinationPort=5555 OR DestinationPort=8888 OR DestinationPort=1337)
+| where NOT (cidrmatch("10.0.0.0/8", DestinationIp) OR cidrmatch("172.16.0.0/12", DestinationIp) OR cidrmatch("192.168.0.0/16", DestinationIp) OR cidrmatch("127.0.0.0/8", DestinationIp) OR cidrmatch("169.254.0.0/16", DestinationIp))
+| stats count by Image, DestinationIp, DestinationPort, ComputerName
+```
+
+**Recommended KQL conversion (Microsoft Sentinel):**
+```kql
+DeviceNetworkEvents
+| where ActionType == "ConnectionSuccess"
+| where RemotePort in (4444, 5555, 8888, 1337)
+| where RemoteIPType != "Private"
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, RemoteIP, RemotePort
+```

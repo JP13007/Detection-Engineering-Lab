@@ -1,0 +1,67 @@
+title: Suspicious Executable Execution from Downloads Folder
+id: detection-001
+description: Detects an executable located in the Downloads folder being launched by Windows Explorer (user double-click). Common user-execution step in phishing and drive-by-download attacks. Matches any executable by pattern (parent + location), not a single filename, so it generalizes beyond one lab artifact.
+author: JP13007
+date: 2026/06/16
+modified: 2026/06/30
+
+detection:
+  selection:
+    EventID: 1
+    Image|endswith: '.exe'
+    ParentImage|endswith: '\explorer.exe'
+    CurrentDirectory|contains: 'Downloads'
+
+  condition: selection
+
+falsepositives:
+  - Legitimate software installers (setup.exe, install.exe) downloaded and launched by users
+  - Application updaters that drop and run executables
+  - User-initiated legitimate executable downloads
+
+level: medium
+status: experimental
+tags:
+  - attack.initial_access
+  - attack.execution
+  - attack.t1204.002
+
+references:
+  - https://attack.mitre.org/techniques/T1204/002/
+  - https://attack.mitre.org/techniques/T1566/001/
+
+---
+
+## Rule Tuning Notes
+
+**Why this changed from the original:**
+The first version hardcoded `Image|endswith: '\update.exe'`. That matched only the original lab artifact and would miss any real malicious download with a different name. Validation (see test_results_rule_1.md) confirmed the pattern (explorer.exe -> .exe in Downloads) fires correctly against real captured telemetry using a renamed benign file, so the rule now matches the *pattern* and relies on tuning to control false positives rather than pinning to one filename.
+
+**False Positive Reduction (the broadened rule needs this):**
+
+1. **Signature verification (highest-value lever)** — Exclude executables signed by Microsoft or a trusted publisher. This removes the bulk of legitimate installers/updaters.
+
+2. **Known-installer exclusion** — Optionally exclude common installer names (setup.exe, install.exe, installer.exe) where signature data is unavailable.
+
+3. **Time gap** — A file launched shortly after it was written to Downloads is higher-signal than one that sat there for hours (correlate Sysmon EventID 11 file-create with EventID 1 process-create).
+
+**Recommended SPL conversion (Splunk):**
+```spl
+index=win_logs host=DESKTOP-9BB4HVN
+| rex field=_raw "<EventID>(?<EventID>\d+)</EventID>"
+| where EventID="1"
+| rex field=_raw "<Data Name='Image'>(?<Image>[^<]+)</Data>"
+| rex field=_raw "<Data Name='ParentImage'>(?<ParentImage>[^<]+)</Data>"
+| rex field=_raw "<Data Name='CurrentDirectory'>(?<CurrentDirectory>[^<]+)</Data>"
+| where like(Image,"%.exe") AND like(ParentImage,"%explorer.exe") AND like(CurrentDirectory,"%Downloads%")
+| table _time, Image, ParentImage, CurrentDirectory
+```
+
+**Recommended KQL conversion (Microsoft Sentinel):**
+```kql
+DeviceProcessEvents
+| where InitiatingProcessFileName =~ "explorer.exe"
+| where FolderPath contains "Downloads"
+| where FileName endswith ".exe"
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, FileName, FolderPath
+```

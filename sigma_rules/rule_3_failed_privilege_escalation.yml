@@ -1,0 +1,84 @@
+title: Local Account Creation / Modification via net.exe
+id: detection-003
+description: Detects use of net.exe / net1.exe to create local accounts or modify group membership (user / localgroup / group with /add). Used post-compromise for persistence and privilege escalation. Fires on the command attempt regardless of success or failure; pair with Windows Security EventID 4720 to confirm successful creation.
+author: JP13007
+date: 2026/06/16
+modified: 2026/06/30
+
+detection:
+  selection:
+    EventID: 1
+    Image|endswith:
+      - '\net.exe'
+      - '\net1.exe'
+    CommandLine|contains:
+      - 'user'
+      - 'localgroup'
+      - 'group'
+    CommandLine|contains|all:
+      - '/add'
+
+  condition: selection
+
+falsepositives:
+  - System administrators running legitimate user management scripts
+  - Help desk tools automating account creation/modification
+  - Batch user provisioning during onboarding
+  - Management/automation tooling (SCCM, Ansible, Puppet)
+
+level: medium
+status: experimental
+tags:
+  - attack.persistence
+  - attack.t1136.001
+  - attack.privilege_escalation
+  - attack.t1548.002
+
+references:
+  - https://attack.mitre.org/techniques/T1136/001/
+  - https://attack.mitre.org/techniques/T1548/002/
+
+---
+
+## Rule Tuning Notes
+
+**Why this changed from the original:**
+The first version used `EventID: 5` (process termination) in a second selection and a `| near` correlation that does not reliably indicate account-creation. Validation (see test_results_rule_3.md) showed the reliable signal is the **process-creation event (EventID 1)** for net.exe/net1.exe carrying `user`/`localgroup` + `/add` in the command line. This version matches that directly. The original was also titled "Failed" escalation, but the rule should fire whether the attempt succeeds or fails — a rule that only caught failures would miss successful malicious account creation.
+
+**net.exe / net1.exe delegation:**
+`net user /add` produces both a `net.exe` event (parent cmd.exe) and a delegated `net1.exe` event (parent net.exe). Both Image values are included; de-duplicate downstream.
+
+**Confirming success vs. attempt:**
+- This Sysmon rule captures the *attempt* (the command ran).
+- Pair with **Windows Security EventID 4720** ("a user account was created") to confirm the account was actually created. The combination distinguishes a blocked attempt from a successful one.
+
+**False Positive Reduction:**
+1. **Parent/context** — `net user /add` from a freshly spawned shell under an unusual parent is higher-signal than the same command in an admin's interactive session.
+2. **Whitelisting** — Exclude known admin service accounts and management tooling by parent process.
+3. **Baseline** — Establish expected account-creation frequency for the environment; alert on deviations.
+
+**Recommended SPL conversion (Splunk):**
+```spl
+index=win_logs host=DESKTOP-9BB4HVN
+| rex field=_raw "<EventID>(?<EventID>\d+)</EventID>"
+| where EventID="1"
+| rex field=_raw "<Data Name='Image'>(?<Image>[^<]+)</Data>"
+| rex field=_raw "<Data Name='CommandLine'>(?<CommandLine>[^<]+)</Data>"
+| where (like(Image,"%net.exe") OR like(Image,"%net1.exe"))
+| where like(CommandLine,"%/add%") AND (like(CommandLine,"%user%") OR like(CommandLine,"%localgroup%"))
+| table _time, CommandLine, Image
+```
+
+**Pair with Security log for confirmed creation:**
+```spl
+source="WinEventLog:Security" EventCode=4720
+| table _time, Account_Name, Target_User_Name
+```
+
+**Recommended KQL conversion (Microsoft Sentinel):**
+```kql
+DeviceProcessEvents
+| where FileName in ("net.exe","net1.exe")
+| where ProcessCommandLine contains "/add" and (ProcessCommandLine contains "user" or ProcessCommandLine contains "localgroup")
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, FileName, ProcessCommandLine
+```
